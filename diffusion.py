@@ -6,7 +6,6 @@ import torch
 import cv2
 from PIL import Image
 from typing import List, Union
-# 请根据你的实际环境引入正确的 StableVideoDiffusionPipeline 和 Scheduler 模块
 from svd.svd_pipeline import StableVideoDiffusionPipeline
 from svd.scheduler import EulerDiscreteScheduler
 from render import images_to_video

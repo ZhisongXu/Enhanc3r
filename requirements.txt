@@ -1,3 +1,4 @@
+
 torch
 torchvision
 roma
@@ -16,3 +17,6 @@ gdown
 imageio
 cython
 icecream
+numpy
+Pillow
+diffusers
