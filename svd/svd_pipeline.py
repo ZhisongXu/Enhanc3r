@@ -392,39 +392,10 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         resample_steps: Optional[int] = 1,
         guide_util: Optional[int] = 10,
     ):
-        r"""
-        The call function to the pipeline for generation with innovative enhancements.
-        
-        Args:
-            video (np.ndarray): Input video data.
-            mask (Optional[np.ndarray], optional): Mask, defaults to None.
-            height (int, optional): Height of generated video, defaults to 576.
-            width (int, optional): Width of generated video, defaults to 1024.
-            num_frames (Optional[int], optional): Number of video frames, defaults to None.
-            num_inference_steps (int, optional): Number of denoising steps, defaults to 25.
-            min_guidance_scale (float, optional): Minimum guidance scale, defaults to 1.0.
-            max_guidance_scale (float, optional): Maximum guidance scale, defaults to 3.0.
-            fps (int, optional): Frames per second, defaults to 7 (adjusted internally).
-            motion_bucket_id (int, optional): Motion control parameter, defaults to 127.
-            noise_aug_strength (float, optional): Noise strength for initial image, defaults to 0.
-            decode_chunk_size (Optional[int], optional): Frames decoded at once, defaults to None.
-            num_videos_per_prompt (Optional[int], optional): Videos per prompt, defaults to 1.
-            generator (Optional[Union[torch.Generator, List[torch.Generator]]], optional): Random generator.
-            latents (Optional[torch.FloatTensor], optional): Pre-generated latents, defaults to None.
-            output_type (Optional[str], optional): Output format, defaults to "pil".
-            callback_on_step_end (Optional[Callable], optional): Callback after each step.
-            callback_on_step_end_tensor_inputs (List[str], optional): Tensor inputs for callback.
-            return_dict (bool, optional): Return as dict, defaults to True.
-            visualize_each_step_path (Optional[str], optional): Path to save step visualizations.
-            resample_steps (Optional[int], optional): Resampling steps per inference, defaults to 1.
-            guide_util (Optional[int], optional): Steps for guidance, defaults to 10.
-
-        Returns:
-            StableVideoDiffusionPipelineOutput or frames: Generated video output.
-        """
+        # Input validation
         assert resample_steps >= 1, "resample_steps must be at least 1"
 
-        # 0. Default height and width
+        # 1. Set default height and width
         height = height or self.unet.config.sample_size * self.vae_scale_factor
         width = width or self.unet.config.sample_size * self.vae_scale_factor
         num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
@@ -433,22 +404,22 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
             f"The number of frames in the video must be equal to num_frames, expected {num_frames} but got {video.shape[1]}"
         )
 
-        # 1. Check inputs
+        # 2. Check inputs
         self.check_inputs(video, height, width)
 
-        # 2. Define batch size and device
+        # 3. Define batch size and device
         batch_size = video.shape[0] if isinstance(video, np.ndarray) else 1
         device = self._execution_device
         self._guidance_scale = max_guidance_scale
 
-        # 3. Encode input image (first frame)
+        # 4. Encode input image (first frame)
         image = video[0, 0][None, ...]
         image_embeddings = self._encode_image(image, device, num_videos_per_prompt, self.do_classifier_free_guidance)
 
-        # Adjust fps as per training condition
+        # Adjust FPS to meet training conditions
         fps = fps - 1
 
-        # 4. Encode video and image using VAE
+        # 5. Use VAE to encode the video and image
         video_tensor = self.image_processor.preprocess(video[0], height=height, width=width).to(device)
         image_tensor = self.image_processor.preprocess(image, height=height, width=width).to(device)
         noise = randn_tensor(image_tensor.shape, generator=generator, device=device, dtype=image_tensor.dtype)
@@ -471,42 +442,45 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
 
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
 
-        # 5. Get Added Time IDs
+        # 6. Get additional time IDs
         added_time_ids = self._get_add_time_ids(
             fps, motion_bucket_id, noise_aug_strength, image_embeddings.dtype, batch_size,
             num_videos_per_prompt, self.do_classifier_free_guidance
         ).to(device)
 
-        # 6. Prepare timesteps
+        # 7. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 7. Prepare latent variables
+        # 8. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt, num_frames, num_channels_latents, height, width,
             image_embeddings.dtype, device, generator, latents
         )
 
-        # 8. Prepare guidance scale
+        # 9. Prepare guidance scale
         guidance_scale = torch.linspace(min_guidance_scale, max_guidance_scale, num_frames).unsqueeze(0)
         guidance_scale = guidance_scale.to(device, latents.dtype).repeat(batch_size * num_videos_per_prompt, 1)
         guidance_scale = _append_dims(guidance_scale, latents.ndim)
         self._guidance_scale = guidance_scale
 
-        # === Innovative Enhancements ===
+        # === Innovative Enhancement Features ===
 
-        # Innovation 1: Dynamic Noise Rescheduling
+        # Enhancement 1: Dynamic noise rescheduling
         def dynamic_noise_reschedule(timesteps, base_strength=0.7):
             weights = torch.linspace(base_strength, 1.0 - base_strength, len(timesteps))
             return weights.to(timesteps.device)
         noise_reschedule_weights = dynamic_noise_reschedule(timesteps)
 
-        # Innovation 2: Motion-Aware Latent Initialization
+        # Enhancement 2: Motion-aware latent initialization
         def motion_aware_latent_init(video_latents, latents, num_frames):
-            motion_features = video_latents[1:] - video_latents[:-1]
-            avg_motion = motion_features.mean(dim=0, keepdim=True)
-            new_latents = torch.cat([latents, avg_motion.repeat(latents.shape[0], 1, 1, 1)], dim=2)  # Adjusted dim
+            # Calculate motion features and pad them to align with num_frames
+            motion_features = video_latents[:, 1:] - video_latents[:, :-1]  # [B, F-1, C, H, W]
+            zero_pad = torch.zeros_like(video_latents[:, :1])  # [B, 1, C, H, W]
+            motion_features = torch.cat([zero_pad, motion_features], dim=1)  # [B, F, C, H, W]
+            avg_motion = motion_features.mean(dim=0, keepdim=True)  # [1, F, C, H, W]
+            new_latents = latents + 0.1 * avg_motion.repeat(latents.shape[0], 1, 1, 1, 1)
             return new_latents, motion_features
 
         if video_latents is not None:
@@ -514,13 +488,13 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         else:
             motion_features = None
 
-        # Innovation 3: Hierarchical Guidance Strategy
+        # Enhancement 3: Hierarchical guidance strategy
         class HierarchicalGuidance:
             def __init__(self, total_steps, guide_util):
                 self.stage_thresholds = [
                     (0, 0.2, "coarse"),   # First 20%: Coarse guidance
                     (0.2, 0.8, "detail"), # Middle 60%: Detail optimization
-                    (0.8, 1.0, "refine")  # Last 20%: Fine refinement
+                    (0.8, 1.0, "refine")  # Last 20%: Fine-tuning
                 ]
 
             def adjust_guidance(self, progress):
@@ -536,7 +510,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
 
         h_guidance = HierarchicalGuidance(num_inference_steps, guide_util)
 
-        # 9. Denoising Loop with Enhancements
+        # 10. Denoising loop (with enhancement features)
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -546,23 +520,24 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                 adjusted_guidance_scale = guidance_scale * guidance_params["scale_factor"]
 
                 for r in range(resample_steps):
-                    # Classifier free guidance
+                    # Classifier-free guidance
                     latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                    # Innovation 4: Spatio-Temporal Consistency
+                    # Enhancement 4: Spatiotemporal consistency
                     if r > 0 and i < guide_util:
                         shifted_latents = torch.roll(latents, shifts=1, dims=1)
                         latents = 0.7 * latents + 0.3 * shifted_latents
 
-                    # Concatenate motion features if available
+                    # Enhancement 5: Concatenate motion features
                     if motion_features is not None:
-                        motion_feat = motion_features[min(i % motion_features.shape[0], motion_features.shape[0] - 1)].unsqueeze(0)
-                        latent_model_input = torch.cat([latent_model_input, motion_feat.repeat(latent_model_input.shape[0], 1, 1, 1, 1)], dim=2)
+                        motion_feat = motion_features[:, min(i % num_frames, num_frames - 1), ...].unsqueeze(0)  # [1, C, H, W]
+                        motion_feat = motion_feat.repeat(1, num_frames, 1, 1, 1)  # [1, F, C, H, W]
+                        latent_model_input = latent_model_input + 0.1 * motion_feat.repeat(latent_model_input.shape[0], 1, 1, 1, 1)
                     else:
-                        latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
+                        latent_model_input = latent_model_input + 0.1 * image_latents
 
-                    # Predict noise with dynamic rescheduling
+                    # Use dynamic noise rescheduling to predict noise
                     noise_pred = self.unet(
                         latent_model_input,
                         t * noise_reschedule_weights[i],
@@ -571,14 +546,14 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                         return_dict=False,
                     )[0]
 
-                    # Perform guidance
+                    # Apply guidance
                     if self.do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + adjusted_guidance_scale * (
                             guidance_params["temporal_weight"] * (noise_pred_cond - noise_pred_uncond)
                         )
 
-                    # Innovation 5: Adaptive Resampling
+                    # Adaptive resampling
                     if r < resample_steps - 1:
                         scheduler_output = self.scheduler.step(
                             noise_pred, t, latents,
@@ -600,15 +575,15 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                         pred_original_sample = scheduler_output.pred_original_sample.half()
                         latents = scheduler_output.prev_sample
 
-                # Innovation 6: Latent Space Sharpening
+                # Enhancement 6: Latent space sharpening
                 if current_progress > 0.8:
                     sharpening_kernel = torch.tensor(
                         [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]],
                         dtype=latents.dtype, device=device
-                    ).view(1, 1, 3, 3)
+                    ).view(1, 1, 3, 3).expand(latents.shape[2], 1, 3, 3)  # [C, 1, 3, 3]
                     for b in range(latents.shape[0]):
                         for f in range(latents.shape[1]):
-                            latents[b, f] = F.conv2d(latents[b, f].unsqueeze(0), sharpening_kernel, padding=1).squeeze(0)
+                            latents[b, f] = F.conv2d(latents[b, f].unsqueeze(0), sharpening_kernel, groups=latents.shape[2], padding=1).squeeze(0)
 
                 # Visualization
                 if visualize_each_step_path:
@@ -617,7 +592,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                     frames = tensor2vid(frames, self.image_processor, output_type=output_type)
                     export_to_video(frames[0], os.path.join(visualize_each_step_path, f"generated_step{i:02d}.mp4"), fps=7)
 
-                # Callback
+                # Callback function
                 if callback_on_step_end:
                     callback_kwargs = {k: locals()[k] for k in callback_on_step_end_tensor_inputs}
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
@@ -626,7 +601,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                 if i >= num_warmup_steps and (i + 1) % self.scheduler.order == 0:
                     progress_bar.update()
 
-        # 10. Decode and Return
+        # 11. Decode and return the result
         if output_type != "latent":
             if needs_upcasting:
                 self.vae.to(dtype=torch.float16)
