@@ -160,7 +160,8 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
             # We normalize the image before resizing to match with the original implementation.
             # Then we unnormalize it after resizing.
             image = image * 2.0 - 1.0
-            image = _resize_with_antialiasing(image, (224, 224))
+            processor = GaussianVideoProcessor(device="cuda")
+            image = processor.process_frame(image)
             image = (image + 1.0) / 2.0
 
         # Normalize the image with for CLIP input
@@ -608,8 +609,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                         self.scheduler._step_index -= 1
                         latents = self.scheduler.add_noise(
                             pred_original_sample,
-                            # torch.randn_like(pred_original_sample), 为保持视频原有特征避免增加随机噪声而是增加去噪前的本体
-                            (latent_model_input + torch.randn_like(pred_original_sample)) * 0.5,
+                            torch.randn_like(pred_original_sample),
                             t
                         )
 
@@ -654,172 +654,65 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
 
 # resizing utils
 # TODO: clean up later
-# def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
-#     h, w = input.shape[-2:]
-#     factors = (h / size[0], w / size[1])
+class GaussianVideoProcessor:
+    def __init__(self, device='cuda'):
+        self.device = torch.device(device)
+        self.prev_frame = None  # 用于时间平滑
 
-#     # First, we have to determine sigma
-#     # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
-#     sigmas = (
-#         max((factors[0] - 1.0) / 2.0, 0.001),
-#         max((factors[1] - 1.0) / 2.0, 0.001),
-#     )
+    @staticmethod
+    def detect_black_regions(frame_tensor, threshold=0.01):
+        """检测接近黑色的区域，返回掩膜（1表示需要修复，0表示保留）"""
+        mask = frame_tensor.mean(dim=0, keepdim=True) < threshold  # [1, H, W]
+        return mask.expand_as(frame_tensor)  # 使其与 frame_tensor 形状匹配
 
-#     # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
-#     # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206
-#     # But they do it in the 2 passes, which gives better results. Let's try 2 sigmas for now
-#     ks = int(max(2.0 * 2 * sigmas[0], 3)), int(max(2.0 * 2 * sigmas[1], 3))
+    @staticmethod
+    def create_gaussian_kernel(kernel_size, sigma):
+        """生成一维高斯核"""
+        x = torch.arange(kernel_size, dtype=torch.float32) - (kernel_size - 1) / 2
+        kernel = torch.exp(-0.5 * (x / sigma).pow(2))
+        kernel /= kernel.sum()
+        return kernel.view(1, 1, kernel_size)  # 形状适配 conv2d
 
-#     # Make sure it is odd
-#     if (ks[0] % 2) == 0:
-#         ks = ks[0] + 1, ks[1]
+    def _gaussian_blur2d(self, input_tensor, kernel_size, sigma):
+        """可分离二维高斯模糊"""
+        device = input_tensor.device
+        kernel_size = tuple(k | 1 for k in kernel_size)  # 确保 kernel_size 为奇数
 
-#     if (ks[1] % 2) == 0:
-#         ks = ks[0], ks[1] + 1
+        # 水平卷积
+        kernel_h = self.create_gaussian_kernel(kernel_size[0], sigma[0]).to(device)
+        kernel_h = kernel_h.expand(input_tensor.size(1), -1, -1, -1)
+        input_tensor = F.conv2d(input_tensor, kernel_h, padding=(kernel_size[0] // 2, 0), groups=input_tensor.size(1))
 
-#     input = _gaussian_blur2d(input, ks, sigmas)
+        # 垂直卷积
+        kernel_v = self.create_gaussian_kernel(kernel_size[1], sigma[1]).to(device)
+        kernel_v = kernel_v.expand(input_tensor.size(1), -1, -1, -1)
+        return F.conv2d(input_tensor, kernel_v, padding=(0, kernel_size[1] // 2), groups=input_tensor.size(1))
 
-#     output = torch.nn.functional.interpolate(input, size=size, mode=interpolation, align_corners=align_corners)
-#     return output
+    def temporal_smoothing(self, input_tensor, alpha=0.9):
+        """时间维度平滑"""
+        if self.prev_frame is None:
+            self.prev_frame = input_tensor
+        else:
+            self.prev_frame = alpha * self.prev_frame + (1 - alpha) * input_tensor
+        return self.prev_frame
 
+    def process_frame(self, input_tensor, alpha=0.9):
+        """处理单帧：黑色区域修复 + 高斯模糊 + 时间平滑"""
+        # 计算高斯模糊参数
+        h, w = input_tensor.shape[-2:]
+        sigma_h = max(h / 1000, 0.5)  # 经验值，越大模糊越强
+        sigma_w = max(w / 1000, 0.5)
+        ks_h = max(int(6 * sigma_h + 0.5) | 1, 3)
+        ks_w = max(int(6 * sigma_w + 0.5) | 1, 3)
 
-# def _compute_padding(kernel_size):
-#     """Compute padding tuple."""
-#     # 4 or 6 ints:  (padding_left, padding_right,padding_top,padding_bottom)
-#     # https://pytorch.org/docs/stable/nn.html#torch.nn.functional.pad
-#     if len(kernel_size) < 2:
-#         raise AssertionError(kernel_size)
-#     computed = [k - 1 for k in kernel_size]
+        # 检测黑色区域
+        mask = self.detect_black_regions(input_tensor)
 
-#     # for even kernels we need to do asymmetric padding :(
-#     out_padding = 2 * len(kernel_size) * [0]
+        # 先模糊修复
+        blurred = self._gaussian_blur2d(input_tensor, (ks_h, ks_w), (sigma_h, sigma_w))
+        inpainted = torch.where(mask, blurred, input_tensor)
 
-#     for i in range(len(kernel_size)):
-#         computed_tmp = computed[-(i + 1)]
+        # 时间平滑
+        smoothed = self.temporal_smoothing(inpainted, alpha)
 
-#         pad_front = computed_tmp // 2
-#         pad_rear = computed_tmp - pad_front
-
-#         out_padding[2 * i + 0] = pad_front
-#         out_padding[2 * i + 1] = pad_rear
-
-#     return out_padding
-
-
-# def _filter2d(input, kernel):
-#     # prepare kernel
-#     b, c, h, w = input.shape
-#     tmp_kernel = kernel[:, None, ...].to(device=input.device, dtype=input.dtype)
-
-#     tmp_kernel = tmp_kernel.expand(-1, c, -1, -1)
-
-#     height, width = tmp_kernel.shape[-2:]
-
-#     padding_shape: List[int] = _compute_padding([height, width])
-#     input = torch.nn.functional.pad(input, padding_shape, mode="reflect")
-
-#     # kernel and input tensor reshape to align element-wise or batch-wise params
-#     tmp_kernel = tmp_kernel.reshape(-1, 1, height, width)
-#     input = input.view(-1, tmp_kernel.size(0), input.size(-2), input.size(-1))
-
-#     # convolve the tensor with the kernel.
-#     output = torch.nn.functional.conv2d(input, tmp_kernel, groups=tmp_kernel.size(0), padding=0, stride=1)
-
-#     out = output.view(b, c, h, w)
-#     return out
-
-
-# def _gaussian(window_size: int, sigma):
-#     if isinstance(sigma, float):
-#         sigma = torch.tensor([[sigma]])
-
-#     batch_size = sigma.shape[0]
-
-#     x = (torch.arange(window_size, device=sigma.device, dtype=sigma.dtype) - window_size // 2).expand(batch_size, -1)
-
-#     if window_size % 2 == 0:
-#         x = x + 0.5
-
-#     gauss = torch.exp(-x.pow(2.0) / (2 * sigma.pow(2.0)))
-
-#     return gauss / gauss.sum(-1, keepdim=True)
-
-
-# def _gaussian_blur2d(input, kernel_size, sigma):
-#     if isinstance(sigma, tuple):
-#         sigma = torch.tensor([sigma], dtype=input.dtype)
-#     else:
-#         sigma = sigma.to(dtype=input.dtype)
-
-#     ky, kx = int(kernel_size[0]), int(kernel_size[1])
-#     bs = sigma.shape[0]
-#     kernel_x = _gaussian(kx, sigma[:, 1].view(bs, 1))
-#     kernel_y = _gaussian(ky, sigma[:, 0].view(bs, 1))
-#     out_x = _filter2d(input, kernel_x[..., None, :])
-#     out = _filter2d(out_x, kernel_y[..., None])
-
-#     return out
-
-def _gaussian_blur2d(input, kernel_size, sigma):
-    # 分解为水平和垂直方向的一维高斯模糊（优化核生成逻辑）
-    # 水平方向卷积
-    kernel_h = create_gaussian_kernel(kernel_size[0], sigma[0]).to(input.device)
-    kernel_h = kernel_h.view(1, 1, 1, kernel_size[0])  # Shape: [1,1,1,kx]
-    kernel_h = kernel_h.expand(input.shape[1], 1, 1, kernel_size[0])
-    input = F.conv2d(input, kernel_h, padding=(0, kernel_size[0]//2), groups=input.shape[1])
-    
-    # 垂直方向卷积
-    kernel_v = create_gaussian_kernel(kernel_size[1], sigma[1]).to(input.device)
-    kernel_v = kernel_v.view(1, 1, kernel_size[1], 1)  # Shape: [1,1,ky,1]
-    kernel_v = kernel_v.expand(input.shape[1], 1, kernel_size[1], 1)
-    input = F.conv2d(input, kernel_v, padding=(kernel_size[1]//2, 0), groups=input.shape[1])
-    
-    return input
-
-def create_gaussian_kernel(kernel_size, sigma):
-    # 确保 kernel_size 为整数（防止误传元组）
-    if isinstance(kernel_size, tuple):
-        kernel_size = kernel_size[0]
-    x = torch.arange(kernel_size, dtype=torch.float32)
-    x = x - (kernel_size - 1) / 2  # 精确中心化（兼容奇偶尺寸）
-    kernel = torch.exp(-0.5 * (x / sigma).pow(2))
-    kernel = kernel / kernel.sum()  # 归一化
-    return kernel.view(1, 1, kernel_size)
-
-def temporal_smoothing(input, alpha=0.9):  # 增大 alpha 值增强时间平滑
-    smoothed = input.clone()
-    for i in range(1, input.shape[0]):
-        smoothed[i] = alpha * smoothed[i-1] + (1 - alpha) * input[i]
-    return smoothed
-
-def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True, alpha=0.9):
-    h, w = input.shape[-2:]
-    factors = (h / size[0], w / size[1])
-    
-    # 优化 sigma 计算：使用 factor / 2 替代 (factor-1)/2，增大模糊强度
-    sigma_h = max(factors[0] / 2.0, 0.001)  # 关键修改点：sigma = factor / 2
-    sigma_w = max(factors[1] / 2.0, 0.001)
-    
-    # 动态计算核尺寸：覆盖 99.7% 高斯分布（3*sigma原则），并确保为奇数
-    ks_h = int(6 * sigma_h + 0.5)
-    ks_h = ks_h + 1 if ks_h % 2 == 0 else ks_h
-    ks_h = max(ks_h, 3)  # 最小尺寸为3
-    
-    ks_w = int(6 * sigma_w + 0.5)
-    ks_w = ks_w + 1 if ks_w % 2 == 0 else ks_w
-    ks_w = max(ks_w, 3)
-    
-    # 应用更强烈的高斯模糊
-    input = _gaussian_blur2d(input, (ks_h, ks_w), (sigma_h, sigma_w))
-    
-    # 增强时间维度平滑
-    smoothed = temporal_smoothing(input, alpha)
-    
-    # 调整尺寸
-    output = F.interpolate(smoothed, size=size, mode=interpolation, align_corners=align_corners)
-    
-    # 插值后二次模糊（可选，进一步抑制高频）
-    if output.shape[-2:] != size:  # 确保尺寸正确
-        output = F.interpolate(output, size=size, mode=interpolation)
-    output = _gaussian_blur2d(output, (3, 3), (0.5, 0.5))  # 轻微模糊消除插值噪声
-    return output
+        return smoothed
