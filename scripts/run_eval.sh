@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Change the absolute path first!
-DATA_ROOT_DIR="<Absolute_Path>/InstantSplat"
+DATA_ROOT_DIR="<Absolute_Path>/Enhanc3r"
 OUTPUT_DIR="output_eval_XL"
 DATASETS=(
     Tanks
@@ -116,14 +116,25 @@ run_on_gpu() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Rendering completed. Log saved in ${MODEL_PATH}/04_render_test.log"
     # --test_fps \
 
-    # # (5) Metrics
+    # (5) Run diffusion process
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting diffusion process..."
+    CUDA_VISIBLE_DEVICES=${GPU_ID} python ./diffusion.py \
+    --input_folder ${SOURCE_PATH} \
+    --output_folder ${MODEL_PATH}/diffusion_output \
+    --fps 30 \
+    --batch_size 4 \
+    --mode static \
+    > ${MODEL_PATH}/05_diffusion.log 2>&1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Diffusion process completed. Log saved in ${MODEL_PATH}/05_diffusion.log"
+    
+    # (6) Metrics
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Calculating metrics..."
     CUDA_VISIBLE_DEVICES=${GPU_ID} python ./metrics.py \
     -s ${SOURCE_PATH} \
     -m ${MODEL_PATH} \
     --n_views ${N_VIEW} \
-    > ${MODEL_PATH}/05_metrics.log 2>&1
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Metrics calculation completed. Log saved in ${MODEL_PATH}/05_metrics.log"
+    > ${MODEL_PATH}/06_metrics.log 2>&1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Metrics calculation completed. Log saved in ${MODEL_PATH}/06_metrics.log"
 
     echo "======================================================="
     echo "Task completed: ${DATASET}/${SCENE} (${N_VIEW} views/${gs_train_iter} iters) on GPU ${GPU_ID}"

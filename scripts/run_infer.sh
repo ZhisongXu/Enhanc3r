@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Change the absolute path first!
-DATA_ROOT_DIR="<Absolute_Path>/InstantSplat/assets"
+DATA_ROOT_DIR="<Absolute_Path>/Enhanc3r/assets"
 OUTPUT_DIR="output_infer"
 DATASETS=(
     sora
