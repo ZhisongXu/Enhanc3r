@@ -24,6 +24,9 @@ class PointCloudOptimizer(BasePCOptimizer):
 
         self.has_im_poses = True  # by definition of this class
         self.focal_break = focal_break
+        self.smooth_weight = smooth_weight    # 平滑损失权重
+        self.edge_threshold = edge_threshold  # 边缘检测阈值
+        self.huber_delta = huber_delta        # Huber损失参数
 
         # adding thing to optimize
         self.im_depthmaps = nn.ParameterList(torch.randn(H, W)/10-3 for H, W in self.imshapes)  # log(depth)
@@ -185,6 +188,33 @@ class PointCloudOptimizer(BasePCOptimizer):
             res = [dm[:h*w].view(h, w, 3) for dm, (h, w) in zip(res, self.imshapes)]
         return res
 
+    def depth_smoothness_loss(self):
+        """计算深度平滑损失，仅在非边缘区域应用平滑约束"""
+        smooth_loss = 0
+        for depth, (H, W) in zip(self.get_depthmaps(), self.imshapes):
+            depth = depth.view(H, W)
+            grad_x = depth[:, 1:] - depth[:, :-1]  # [H, W-1]
+            grad_y = depth[1:, :] - depth[:-1, :]  # [H-1, W]
+            edge_mask_x = torch.abs(grad_x) > self.edge_threshold
+            edge_mask_y = torch.abs(grad_y) > self.edge_threshold
+            smooth_loss += grad_x[~edge_mask_x].pow(2).mean()
+            smooth_loss += grad_y[~edge_mask_y].pow(2).mean()
+        return smooth_loss
+
+    def dist(self, a, b, weight=1.0, grad_norm=None):
+        """计算带Huber损失和自适应权重的距离"""
+        delta = a - b
+        dist = torch.norm(delta, dim=-1)
+        huber_condition = dist < self.huber_delta
+        huber_loss = torch.where(huber_condition,
+                                 0.5 * dist**2,
+                                 self.huber_delta * (dist - 0.5 * self.huber_delta))
+        if grad_norm is not None:
+            edge_weight = 1 / (1 + 10 * grad_norm)
+        else:
+            edge_weight = 1.0
+        return (huber_loss * weight * edge_weight).mean()
+
     def forward(self):
         pw_poses = self.get_pw_poses()  # cam-to-world
         pw_adapt = self.get_adaptors().unsqueeze(1)
@@ -194,11 +224,25 @@ class PointCloudOptimizer(BasePCOptimizer):
         aligned_pred_i = geotrf(pw_poses, pw_adapt * self._stacked_pred_i)
         aligned_pred_j = geotrf(pw_poses, pw_adapt * self._stacked_pred_j)
 
-        # compute the less
-        li = self.dist(proj_pts3d[self._ei], aligned_pred_i, weight=self._weight_i).sum() / self.total_area_i
-        lj = self.dist(proj_pts3d[self._ej], aligned_pred_j, weight=self._weight_j).sum() / self.total_area_j
+        grad_norms = []
+        for depth, (H, W) in zip(self.get_depthmaps(), self.imshapes):
+            depth = depth.view(H, W)
+            grad_x = depth[:, 1:] - depth[:, :-1]
+            grad_y = depth[1:, :] - depth[:-1, :]
+            grad_x_padded = torch.nn.functional.pad(grad_x, (0, 1), mode='constant', value=0)
+            grad_y_padded = torch.nn.functional.pad(grad_y, (0, 0, 0, 1), mode='constant', value=0)
+            grad_norm = torch.sqrt(grad_x_padded**2 + grad_y_padded**2)
+            grad_norms.append(grad_norm.view(-1))
 
-        return li + lj
+        # 使用Huber损失和自适应权重计算li和lj
+        li = self.dist(proj_pts3d[self._ei], aligned_pred_i, weight=self._weight_i, grad_norm=grad_norms[self._ei])
+        lj = self.dist(proj_pts3d[self._ej], aligned_pred_j, weight=self._weight_j, grad_norm=grad_norms[self._ej])
+
+        # 添加平滑损失
+        smooth_loss = self.depth_smoothness_loss()
+        total_loss = li + lj + self.smooth_weight * smooth_loss
+
+        return total_loss
 
 
 def _fast_depthmap_to_pts3d(depth, pixel_grid, focal, pp):
