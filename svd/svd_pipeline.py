@@ -392,6 +392,34 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         resample_steps: Optional[int] = 1,
         guide_util: Optional[int] = 10,
     ):
+        """
+        处理输入视频并使用稳定视频扩散生成输出帧的函数。
+
+        Args:
+            video (`np.ndarray`): 输入的视频。
+            mask (`np.ndarray`, *可选*, 默认为 None): 可选的掩码。
+            height (`int`, *可选*, 默认为 576): 输出帧的高度。
+            width (`int`, *可选*, 默认为 1024): 输出帧的宽度。
+            num_frames (`int`, *可选*): 生成的帧数。
+            num_inference_steps (`int`, *可选*, 默认为 25): 推理步骤数。
+            min_guidance_scale (`float`, *可选*, 默认为 1.0): 最小引导尺度。
+            max_guidance_scale (`float`, *可选*, 默认为 3.0): 最大引导尺度。
+            fps (`int`, *可选*, 默认为 7): 每秒帧数。
+            motion_bucket_id (`int`, *可选*, 默认为 127): 运动桶 ID。
+            noise_aug_strength (`float`, *可选*, 默认为 0): 噪声增强强度。
+            decode_chunk_size (`int`, *可选*): 解码的块大小。
+            num_videos_per_prompt (`int`, *可选*, 默认为 1): 每个提示生成的视频数。
+            generator (Optional[Union[torch.Generator, List[torch.Generator]]], *可选*): 随机数生成器。
+            latents (Optional[torch.FloatTensor], *可选*): 预生成的潜在变量。
+            output_type (`str`, *可选*, 默认为 "pil"): 输出格式类型。
+            return_dict (`bool`, *可选*, 默认为 True): 是否返回字典。
+
+        Returns:
+            `StableVideoDiffusionPipelineOutput` 或 `tuple`: 如果 return_dict 为 True，则返回 `StableVideoDiffusionPipelineOutput`，
+            否则返回包含帧的元组。
+
+        Examples:
+        """
         # Input validation
         assert resample_steps >= 1, "resample_steps must be at least 1"
 
