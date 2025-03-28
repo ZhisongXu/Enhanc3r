@@ -502,19 +502,28 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         noise_reschedule_weights = dynamic_noise_reschedule(timesteps)
 
         # Enhancement 2: Motion-aware latent initialization
-        def motion_aware_latent_init(video_latents, latents, num_frames):
-            # Calculate motion features and pad them to align with num_frames
-            motion_features = video_latents[:, 1:] - video_latents[:, :-1]  # [B, F-1, C, H, W]
-            zero_pad = torch.zeros_like(video_latents[:, :1])  # [B, 1, C, H, W]
-            motion_features = torch.cat([zero_pad, motion_features], dim=1)  # [B, F, C, H, W]
-            avg_motion = motion_features.mean(dim=0, keepdim=True)  # [1, F, C, H, W]
-            new_latents = latents + 0.1 * avg_motion.repeat(latents.shape[0], 1, 1, 1, 1)
-            return new_latents, motion_features
+        def compute_smoothed_motion(motion_features, window_size=10):
+            B, F, C, H, W = motion_features.shape
+            motion_reshaped = motion_features.permute(0, 2, 3, 4, 1).reshape(B, C * H * W, F)
+            padding = (window_size - 1) // 2
+            motion_padded = F.pad(motion_reshaped, (padding, padding), mode='replicate')
+            smoothed = F.avg_pool1d(motion_padded, kernel_size=window_size, stride=1)
+            smoothed = smoothed.reshape(B, C, H, W, F).permute(0, 4, 1, 2, 3)
+            return smoothed
 
+        def motion_aware_latent_init(video_latents, latents, num_frames, window_size=10):
+            motion_features = video_latents[:, 1:] - video_latents[:, :-1]
+            zero_pad = torch.zeros_like(video_latents[:, :1])
+            motion_features = torch.cat([zero_pad, motion_features], dim=1)
+            smoothed_motion_features = compute_smoothed_motion(motion_features, window_size=window_size)
+            new_latents = latents + 0.1 * smoothed_motion_features
+            return new_latents, smoothed_motion_features
+
+        # 在主代码中
         if video_latents is not None:
-            latents, motion_features = motion_aware_latent_init(video_latents, latents, num_frames)
+            latents, smoothed_motion_features = motion_aware_latent_init(video_latents, latents, num_frames, window_size=10)
         else:
-            motion_features = None
+            smoothed_motion_features = None
 
         # Enhancement 3: Hierarchical guidance strategy
         class HierarchicalGuidance:
@@ -558,10 +567,11 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                         latents = 0.7 * latents + 0.3 * shifted_latents
 
                     # Enhancement 5: Concatenate motion features
-                    if motion_features is not None:
-                        motion_feat = motion_features[:, min(i % num_frames, num_frames - 1), ...].unsqueeze(0)  # [1, C, H, W]
-                        motion_feat = motion_feat.repeat(1, num_frames, 1, 1, 1)  # [1, F, C, H, W]
-                        latent_model_input = latent_model_input + 0.1 * motion_feat.repeat(latent_model_input.shape[0], 1, 1, 1, 1)
+                    if smoothed_motion_features is not None:
+                        motion_to_add = smoothed_motion_features.repeat(
+                            2 if self.do_classifier_free_guidance else 1, 1, 1, 1, 1
+                        )
+                        latent_model_input = latent_model_input + 0.1 * motion_to_add
                     else:
                         latent_model_input = latent_model_input + 0.1 * image_latents
 
