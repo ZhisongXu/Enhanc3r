@@ -1,22 +1,23 @@
 #!/bin/bash
 
 # Change the absolute path first!
-DATA_ROOT_DIR="<Absolute_Path>/Enhanc3r/assets"
+DATA_ROOT_DIR="./assets"
 OUTPUT_DIR="output_infer"
 DATASETS=(
-    sora
+    LLFF-Extra
+    # sora
 )
 
 SCENES=(
-    Santorini
-    Art 
+    benchflower
+    # Santorini
 )
 
 N_VIEWS=(
     3
 )
 
-gs_train_iter=1000
+gs_train_iter=801
 
 # Function to get the id of an available GPU
 get_available_gpu() {
