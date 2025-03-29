@@ -501,9 +501,9 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
             return weights.to(timesteps.device)
         noise_reschedule_weights = dynamic_noise_reschedule(timesteps)
 
-        # Enhancement 2: Motion-aware latent initialization
+                # Enhancement 2: Motion-aware latent initialization
         def compute_smoothed_motion(motion_features, window_size=10):
-            B, F, C, H, W = motion_features.shape
+            B, F, C, H, W = motion_features.shape  # 确保 motion_features 是 5 维张量
             motion_reshaped = motion_features.permute(0, 2, 3, 4, 1).reshape(B, C * H * W, F)
             padding = (window_size - 1) // 2
             motion_padded = F.pad(motion_reshaped, (padding, padding), mode='replicate')
@@ -512,10 +512,21 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
             return smoothed
 
         def motion_aware_latent_init(video_latents, latents, num_frames, window_size=10):
-            motion_features = video_latents[:, 1:] - video_latents[:, :-1]
-            zero_pad = torch.zeros_like(video_latents[:, :1])
-            motion_features = torch.cat([zero_pad, motion_features], dim=1)
+            # 确保 video_latents 和 latents 都是 5 维张量
+            if video_latents.dim() == 4:
+                video_latents = video_latents.unsqueeze(0)  # [F, C, H, W] -> [1, F, C, H, W]
+            if latents.dim() == 4:
+                latents = latents.unsqueeze(0)  # [F, C, H, W] -> [1, F, C, H, W]
+            
+            # 计算 motion_features
+            motion_features = video_latents[:, 1:] - video_latents[:, :-1]  # [B, F-1, C, H, W]
+            zero_pad = torch.zeros_like(video_latents[:, :1])  # [B, 1, C, H, W]
+            motion_features = torch.cat([zero_pad, motion_features], dim=1)  # [B, F, C, H, W]
+            
+            # 平滑 motion_features
             smoothed_motion_features = compute_smoothed_motion(motion_features, window_size=window_size)
+            
+            # 调整 latents
             new_latents = latents + 0.1 * smoothed_motion_features
             return new_latents, smoothed_motion_features
 
