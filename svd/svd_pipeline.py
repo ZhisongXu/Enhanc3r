@@ -329,7 +329,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         shape = (
             batch_size,
             num_frames,
-            num_channels_latents // 2,
+            num_channels_latents//2 ,
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )
@@ -580,6 +580,8 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                         latent_model_input = latent_model_input + 0.1 * motion_to_add
                     else:
                         latent_model_input = latent_model_input + 0.1 * image_latents
+
+                    latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
                     # Use dynamic noise rescheduling to predict noise
                     noise_pred = self.unet(
