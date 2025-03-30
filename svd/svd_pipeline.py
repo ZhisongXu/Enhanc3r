@@ -502,35 +502,47 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         noise_reschedule_weights = dynamic_noise_reschedule(timesteps)
 
         # Enhancement 2: Motion-aware latent initialization
-        def compute_smoothed_motion(motion_features, window_size=11):  # Changed to odd number
+        def compute_smoothed_motion(motion_features, window_size=11, chunk_size=7):
             B, T, C, H, W = motion_features.shape
-            motion_reshaped = motion_features.permute(0, 2, 3, 4, 1).reshape(B, C * H * W, T)
-            padding = (window_size - 1) // 2
-            motion_padded = F.pad(motion_reshaped, (padding, padding), mode='replicate')
-            smoothed = F.avg_pool1d(motion_padded, kernel_size=window_size, stride=1)
-            smoothed = smoothed.reshape(B, C, H, W, T).permute(0, 4, 1, 2, 3)
-            return smoothed
+            num_chunks = (T + chunk_size - 1) // chunk_size
+            smoothed_chunks = []
+            
+            for i in range(num_chunks):
+                start = i * chunk_size
+                end = min((i + 1) * chunk_size, T)
+                chunk = motion_features[:, start:end]  # e.g., (1, 7, 4, 72, 128)
+                
+                # Reshape and pad only this chunk
+                motion_reshaped = chunk.permute(0, 2, 3, 4, 1).reshape(B, C * H * W, -1)  # e.g., (1, 36864, 7)
+                padding = (window_size - 1) // 2
+                motion_padded = F.pad(motion_reshaped, (padding, padding), mode='replicate')  # e.g., (1, 36864, 17)
+                smoothed = F.avg_pool1d(motion_padded, kernel_size=window_size, stride=1)  # e.g., (1, 36864, 7)
+                smoothed = smoothed.reshape(B, C, H, W, -1).permute(0, 4, 1, 2, 3)  # e.g., (1, 7, 4, 72, 128)
+                smoothed_chunks.append(smoothed)
+            
+            return torch.cat(smoothed_chunks, dim=1)  # (1, 25, 4, 72, 128)
 
-        def motion_aware_latent_init(video_latents, latents, num_frames, window_size=11):  # Changed to 11
+        def motion_aware_latent_init(video_latents, latents, num_frames, window_size=11, chunk_size=7):
             if video_latents.dim() == 4:
                 video_latents = video_latents.unsqueeze(0)
             if latents.dim() == 4:
                 latents = latents.unsqueeze(0)
             
-            motion_features = video_latents[:, 1:] - video_latents[:, :-1]
-            zero_pad = torch.zeros_like(video_latents[:, :1])
-            motion_features = torch.cat([zero_pad, motion_features], dim=1)
+            motion_features = video_latents[:, 1:] - video_latents[:, :-1]  # (1, 24, 4, 72, 128)
+            zero_pad = torch.zeros_like(video_latents[:, :1])  # (1, 1, 4, 72, 128)
+            motion_features = torch.cat([zero_pad, motion_features], dim=1)  # (1, 25, 4, 72, 128)
             
-            smoothed_motion_features = compute_smoothed_motion(motion_features, window_size=window_size)
-            
+            smoothed_motion_features = compute_smoothed_motion(motion_features, window_size, chunk_size)
             new_latents = latents + 0.1 * smoothed_motion_features
             return new_latents, smoothed_motion_features
 
-        # 在主代码中
+      
         if video_latents is not None:
-            latents, smoothed_motion_features = motion_aware_latent_init(video_latents, latents, num_frames, window_size=11)
+            latents, smoothed_motion_features = motion_aware_latent_init(video_latents, latents, num_frames, window_size=11, chunk_size=7)
         else:
             smoothed_motion_features = None
+
+
         # Enhancement 3: Hierarchical guidance strategy
         class HierarchicalGuidance:
             def __init__(self, total_steps, guide_util):
@@ -567,12 +579,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                     latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                    # Enhancement 4: Spatiotemporal consistency
-                    if r > 0 and i < guide_util:
-                        shifted_latents = torch.roll(latents, shifts=1, dims=1)
-                        latents = 0.7 * latents + 0.3 * shifted_latents
-
-                    # Enhancement 5: Concatenate motion features
+                    # Enhancement 4: Concatenate motion features
                     if smoothed_motion_features is not None:
                         motion_to_add = smoothed_motion_features.repeat(
                             2 if self.do_classifier_free_guidance else 1, 1, 1, 1, 1
