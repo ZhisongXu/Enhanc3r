@@ -502,40 +502,42 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         noise_reschedule_weights = dynamic_noise_reschedule(timesteps)
 
         # Enhancement 2: Motion-aware latent initialization
-        def compute_smoothed_motion(motion_features, window_size=11, chunk_size=7):
+        def compute_smoothed_motion(motion_features, window_size=11):
             B, T, C, H, W = motion_features.shape
-            num_chunks = (T + chunk_size - 1) // chunk_size
-            smoothed_chunks = []
             
-            for i in range(num_chunks):
-                start = i * chunk_size
-                end = min((i + 1) * chunk_size, T)
-                chunk = motion_features[:, start:end]  # e.g., (1, 7, 4, 72, 128)
-                
-                # Reshape and pad only this chunk
-                motion_reshaped = chunk.permute(0, 2, 3, 4, 1).reshape(B, C * H * W, -1)  # e.g., (1, 36864, 7)
-                padding = (window_size - 1) // 2
-                motion_padded = F.pad(motion_reshaped, (padding, padding), mode='replicate')  # e.g., (1, 36864, 17)
-                smoothed = F.avg_pool1d(motion_padded, kernel_size=window_size, stride=1)  # e.g., (1, 36864, 7)
-                smoothed = smoothed.reshape(B, C, H, W, -1).permute(0, 4, 1, 2, 3)  # e.g., (1, 7, 4, 72, 128)
-                smoothed_chunks.append(smoothed)
+            # 重塑张量，将时间维度移到最后
+            motion_reshaped = motion_features.permute(0, 2, 3, 4, 1).reshape(B, C * H * W, T)
             
-            return torch.cat(smoothed_chunks, dim=1)  # (1, 25, 4, 72, 128)
+            # 计算填充大小
+            padding = (window_size - 1) // 2
+            
+            # 对整个序列进行填充
+            motion_padded = F.pad(motion_reshaped, (padding, padding), mode='replicate')
+            
+            # 一次性应用1D平均池化
+            smoothed = F.avg_pool1d(motion_padded, kernel_size=window_size, stride=1)
+            
+            # 恢复原始形状
+            smoothed = smoothed.reshape(B, C, H, W, T).permute(0, 4, 1, 2, 3)
+            
+            return smoothed
 
-        def motion_aware_latent_init(video_latents, latents, num_frames, window_size=11, chunk_size=7):
+        def motion_aware_latent_init(video_latents, latents, num_frames, window_size=11):
             if video_latents.dim() == 4:
                 video_latents = video_latents.unsqueeze(0)
             if latents.dim() == 4:
                 latents = latents.unsqueeze(0)
             
+            # 计算运动特征
             motion_features = video_latents[:, 1:] - video_latents[:, :-1]  # (1, 24, 4, 72, 128)
             zero_pad = torch.zeros_like(video_latents[:, :1])  # (1, 1, 4, 72, 128)
             motion_features = torch.cat([zero_pad, motion_features], dim=1)  # (1, 25, 4, 72, 128)
             
-            smoothed_motion_features = compute_smoothed_motion(motion_features, window_size, chunk_size)
+            # 使用优化后的平滑函数
+            smoothed_motion_features = compute_smoothed_motion(motion_features, window_size)
             new_latents = latents + 0.1 * smoothed_motion_features
+            
             return new_latents, smoothed_motion_features
-
       
         if video_latents is not None:
             latents, smoothed_motion_features = motion_aware_latent_init(video_latents, latents, num_frames, window_size=11, chunk_size=7)
